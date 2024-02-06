@@ -16,6 +16,8 @@ const doReplies = !process.argv.includes('--no-reply')
 const usePairingCode = process.argv.includes('--use-pairing-code')
 const useMobile = process.argv.includes('--mobile')
 
+import { db } from './database'
+
 // external map to store retry counts of messages when decryption/encryption fails
 // keep this out of the socket itself, so as to prevent a message decryption/encryption loop across socket restarts
 const msgRetryCounterCache = new NodeCache()
@@ -258,29 +260,39 @@ const startSock = async () => {
 							// console.log('replying to', msg.key.remoteJid)
 							await sock!.readMessages([msg.key])
 
-							// Basic responses
-							fs.readFile('./API/reqRes.json', 'utf8', (err, data) => {
-								if (err) throw err;
-								const reqRes = JSON.parse(data);
-								const reqResKeys = Object.keys(reqRes);
-								reqResKeys.forEach((key) => {
-									if (msg.message?.conversation?.toLowerCase().startsWith(key)) {
-										sendMessageWTyping({ text: reqRes[key] }, msg.key.remoteJid!)
-										console.log('replied to', msg.key.remoteJid)
+							if (msg.message?.conversation?.startsWith('!!')) {
+								// retrieve type script code from database
+								db.get("SELECT * FROM code WHERE key = ?", [msg.message?.conversation?.toLowerCase()], (err, row) => {
+									if (err) throw err;
+									if (row) {
+										eval(row.value);
 									}
 								});
-							});
+							}
 
-							if (msg.message?.conversation?.toLowerCase().startsWith('calc') || msg.message?.conversation?.startsWith('hitung')) {
-								const expression = msg.message?.conversation?.replace(/calc|hitung/, '').trim().replace(/,/g, '.')
-								if (expression) {
-									console.log('evaluating', expression)
-									try {
-										const result = math.evaluate(expression, { precision: 14 }).toString()
-										await sendMessageWTyping({ text: `${result}` }, msg.key.remoteJid!)
-									} catch (error) {
-										console.error('error evaluating', error)
-										await sendMessageWTyping({ text: 'Invalid expression' }, msg.key.remoteJid!)
+							if (msg.message?.conversation?.startsWith('!')) {
+								// select from request_response table
+								db.get("SELECT * FROM request_response WHERE key = ?", [msg.message?.conversation?.toLowerCase()], (err, row) => {
+									if (err) throw err;
+									if (row) {
+										// send response
+										sendMessageWTyping({ text: row.value }, msg.key.remoteJid!)
+									}
+								});
+							}
+
+							if (msg.message?.conversation?.startsWith('##')) {
+								if (msg.message?.conversation?.toLowerCase().startsWith('##calc') || msg.message?.conversation?.startsWith('##hitung')) {
+									const expression = msg.message?.conversation?.replace(/##calc/, '').replace(/##hitung/, '')
+									if (expression) {
+										console.log('evaluating', expression)
+										try {
+											const result = math.evaluate(expression, { precision: 14 }).toString()
+											await sendMessageWTyping({ text: `${result}` }, msg.key.remoteJid!)
+										} catch (error) {
+											console.error('error evaluating', error)
+											await sendMessageWTyping({ text: 'Invalid expression' }, msg.key.remoteJid!)
+										}
 									}
 								}
 							}
@@ -358,7 +370,6 @@ const startSock = async () => {
 		return proto.Message.fromObject({})
 	}
 }
-
 // startSock()
 
 // Websocket server
@@ -374,43 +385,116 @@ export function createWebSocketServer(): http.Server {
 	wss.on('connection', (ws: WebSocket) => {
 		ws.on('message', (message: string) => {
 			const data = JSON.parse(message);
+			const { key, value, type, code } = data;
 
-			if (data.type === 'init') {
+			if (type === 'init') {
 				wssSession = ws;
 				startSock();
 			}
 
-			// get reqRes
-			if (data.type === 'reqRes') {
-				fs.readFile('./API/reqRes.json', 'utf8', (err, fileData) => {
-					if (err) throw err;
-					wssSession?.send(fileData);
+			if (type === 'request_responses') {
+				// get request_response from sqlite3
+				db.all('SELECT * FROM request_response', (err, rows) => {
+					if (err) {
+						console.error('Error retrieving request response from the database:', err);
+						ws.send('Error retrieving request response from the database');
+					}
+					console.log('Request response retrieved from the database', rows);
+					ws.send(JSON.stringify(rows));
 				});
 			}
 
-			// add or update reqRes
-			if (data.type === 'addUpdateReqRes') {
-				fs.readFile('./API/reqRes.json', 'utf8', (err, fileData) => {
-					if (err) throw err;
-					const reqRes = JSON.parse(fileData);
-					reqRes[data.key] = data.value;
-					fs.writeFile('./API/reqRes.json', JSON.stringify(reqRes), (err) => {
-						if (err) throw err;
-						ws.send('reqRes added');
-					});
+			if (type === 'request_response-add-update') {
+				// validate data
+				if (!key || !value) {
+					ws.send('key or value is missing');
+					return;
+				}
+
+				// keys must start with !
+				if (!key.startsWith('!')) {
+					ws.send('Key must start with !');
+					return;
+				}
+
+				db.get('SELECT * FROM request_response WHERE key = ?', [key.toLowerCase()], (err: any, row: any) => {
+					if (err) {
+						console.error('Error checking if request response exists in the database:', err);
+						ws.send('Error checking if request response exists in the database');
+					}
+					if (row) {
+						// Update request response in the database
+						db.run('UPDATE request_response SET value = ? WHERE key = ?', [value, key.toLowerCase()]);
+						console.log('Request response updated in the database');
+						ws.send('Request response updated in the database');
+					} else {
+						// Store request response in the database
+						db.run('INSERT INTO request_response (key, value) VALUES (?, ?)', [key.toLowerCase(), value]);
+						console.log('Request response stored in the database');
+						ws.send('Request response stored in the database');
+					}
 				});
 			}
 
-			// delete reqRes
-			if (data.type === 'deleteReqRes') {
-				fs.readFile('./API/reqRes.json', 'utf8', (err, fileData) => {
-					if (err) throw err;
-					const reqRes = JSON.parse(fileData);
-					delete reqRes[data.key];
-					fs.writeFile('./API/reqRes.json', JSON.stringify(reqRes), (err) => {
-						if (err) throw err;
-						ws.send('reqRes deleted');
-					});
+			if (type === 'request_response-delete') {
+				// validate data
+				if (!key) {
+					ws.send('key is missing');
+					return;
+				}
+
+				db.get('SELECT * FROM request_response WHERE key = ?', [key.toLowerCase()], (err: any, row: any) => {
+					if (err) {
+						console.error('Error checking if request response exists in the database:', err);
+						ws.send('Error checking if request response exists in the database');
+					}
+					if (!row) {
+						console.log('Request response does not exist in the database');
+						ws.send('Request response does not exist in the database');
+					}
+					// Delete request response from the database
+					db.run('DELETE FROM request_response WHERE key = ?', [key.toLowerCase()]);
+					console.log('Request response deleted from the database');
+					ws.send('Request response deleted from the database');
+				});
+			}
+
+			// store code to sqlite3
+			if (type === 'code-add') {
+				// validate data
+				if (!key || !value) {
+					ws.send('key or value is missing');
+					return;
+				}
+
+				// key must start with !!
+				if (!key.startsWith('!!')) {
+					ws.send('Key must start with !!');
+					return;
+				}
+
+				db.get('SELECT * FROM code WHERE key = ?', [key.toLowerCase()], (err: any, row: any) => {
+					if (err) {
+						console.error('Error checking if code exists in the database:', err);
+						ws.send('Error checking if code exists in the database');
+					}
+					if (row) {
+						ws.send('Code already exists in the database');
+					}
+					db.run('INSERT INTO code (key, value) VALUES (?, ?)', [key.toLowerCase(), code]);
+					ws.send('Code stored in the database');
+				});
+			}
+
+			// get codes from sqlite3
+			if (type === 'codes') {
+				db.all('SELECT * FROM code', (err, rows) => {
+					if (err) {
+						console.error('Error retrieving code from the database:', err);
+						ws.send('Error retrieving code from the database');
+					}
+					console.log('Code retrieved from the database', rows);
+					ws.send(JSON.stringify(rows));
 				});
 			}
 		});
