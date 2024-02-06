@@ -62,6 +62,12 @@ const startSock = async () => {
 
 	store?.bind(sock.ev)
 
+	// send wss to the client if was logged in on whatsapp web
+	if (sock.authState.creds.registered) {
+		wssSession?.send(JSON.stringify({ type: 'auth', data: "logged in" }));
+	}
+
+
 	// Pairing code for Web clients
 	if (usePairingCode && !sock.authState.creds.registered) {
 		if (useMobile) {
@@ -177,6 +183,16 @@ const startSock = async () => {
 						startSock()
 					} else {
 						console.log('Connection closed. You are logged out.')
+						wssSession?.send(JSON.stringify({ type: 'auth', data: "Logged out" }));
+
+						// clear bayleys_auth_info directory
+						console.log('Clearing baileys_auth_info directory')
+						fs.rmdirSync('./baileys_auth_info', { recursive: true });
+
+						// relogin
+						console.log('Relogging in')
+						wssSession?.send(JSON.stringify({ type: 'auth', data: "Relogging in" }));
+						startSock()
 					}
 				}
 
@@ -190,6 +206,16 @@ const startSock = async () => {
 						}
 						wssSession?.send(JSON.stringify({ type: 'base64', data: url }))
 					})
+				}
+
+				// if connection is connecting
+				if (update.connection === 'connecting') {
+					wssSession?.send(JSON.stringify({ type: 'auth', data: "Connecting" }));
+				}
+
+				// if the connection was opened
+				if (update.connection === 'open') {
+					wssSession?.send(JSON.stringify({ type: 'auth', data: "Logged in" }));
 				}
 			}
 
@@ -349,12 +375,9 @@ export function createWebSocketServer(): http.Server {
 		ws.on('message', (message: string) => {
 			const data = JSON.parse(message);
 
-			if (data === 'init') {
+			if (data.type === 'init') {
 				wssSession = ws;
-				// delay to wait for the socket to be ready
-				setTimeout(() => {
-					startSock();
-				}, 1000);
+				startSock();
 			}
 
 			// get reqRes

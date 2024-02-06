@@ -26,8 +26,7 @@
     "WASignalGroup/*.js"
   ],
   "scripts": {
-    "app": "node --inspect -r ts-node/register API/app.ts",
-    "dev": "npx nodemon API/index.ts"
+    "app": "node --inspect -r ts-node/register API/index.ts"
   },
   "dependencies": {
     "@adiwajshing/keyed-db": "^0.2.4",

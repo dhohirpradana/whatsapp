@@ -8,4 +8,6 @@ RUN yarn install --force
 
 COPY . .
 
-CMD ["yarn", "run", "example"]
+EXPOSE 3000
+
+CMD ["yarn", "run", "app"]
