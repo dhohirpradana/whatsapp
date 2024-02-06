@@ -188,7 +188,7 @@ const startSock = async () => {
 							console.error('error generating qr', err)
 							return
 						}
-						wssSession.send(JSON.stringify({ type: 'base64', data: url }))
+						wssSession?.send(JSON.stringify({ type: 'base64', data: url }))
 					})
 				}
 			}
