@@ -5,6 +5,7 @@ import makeWASocket, { AnyMessageContent, Browsers, delay, DisconnectReason, fet
 import MAIN_LOGGER from '../src/Utils/logger'
 import open from 'open'
 import fs from 'fs'
+import * as qrcode from 'qrcode';
 const math = require('mathjs');
 
 const logger = MAIN_LOGGER.child({})
@@ -180,6 +181,16 @@ const startSock = async () => {
 				}
 
 				console.log('connection update', update)
+				// qr to base64
+				if (update.qr) {
+					qrcode.toDataURL(update.qr, (err, url) => {
+						if (err) {
+							console.error('error generating qr', err)
+							return
+						}
+						wssSession.send(JSON.stringify({ type: 'base64', data: url }))
+					})
+				}
 			}
 
 			// credentials updated -- save them
@@ -220,12 +231,19 @@ const startSock = async () => {
 							}
 							// console.log('replying to', msg.key.remoteJid)
 							await sock!.readMessages([msg.key])
-							// await sendMessageWTyping({ text: 'Hello there!' }, msg.key.remoteJid!)
-							// if message starts with "!ping", reply with "pong"
-							if (msg.message?.conversation?.toLowerCase().startsWith('ping')) {
-								await sendMessageWTyping({ text: 'pong' }, msg.key.remoteJid!)
-								console.log('replied to', msg.key.remoteJid)
-							}
+
+							// Basic responses
+							fs.readFile('./API/reqRes.json', 'utf8', (err, data) => {
+								if (err) throw err;
+								const reqRes = JSON.parse(data);
+								const reqResKeys = Object.keys(reqRes);
+								reqResKeys.forEach((key) => {
+									if (msg.message?.conversation?.toLowerCase().startsWith(key)) {
+										sendMessageWTyping({ text: reqRes[key] }, msg.key.remoteJid!)
+										console.log('replied to', msg.key.remoteJid)
+									}
+								});
+							});
 
 							if (msg.message?.conversation?.toLowerCase().startsWith('calc') || msg.message?.conversation?.startsWith('hitung')) {
 								const expression = msg.message?.conversation?.replace(/calc|hitung/, '').trim().replace(/,/g, '.')
@@ -315,4 +333,70 @@ const startSock = async () => {
 	}
 }
 
-startSock()
+// startSock()
+
+// Websocket server
+import * as WebSocket from 'ws';
+import * as http from 'http';
+
+let wssSession: WebSocket | null = null;
+
+export function createWebSocketServer(): http.Server {
+	const server = http.createServer();
+	const wss = new WebSocket.Server({ server });
+
+	wss.on('connection', (ws: WebSocket) => {
+		ws.on('message', (message: string) => {
+			const data = JSON.parse(message);
+
+			if (data === 'init') {
+				wssSession = ws;
+				// delay to wait for the socket to be ready
+				setTimeout(() => {
+					startSock();
+				}, 1000);
+			}
+
+			// get reqRes
+			if (data.type === 'reqRes') {
+				fs.readFile('./API/reqRes.json', 'utf8', (err, fileData) => {
+					if (err) throw err;
+					wssSession?.send(fileData);
+				});
+			}
+
+			// add or update reqRes
+			if (data.type === 'addUpdateReqRes') {
+				fs.readFile('./API/reqRes.json', 'utf8', (err, fileData) => {
+					if (err) throw err;
+					const reqRes = JSON.parse(fileData);
+					reqRes[data.key] = data.value;
+					fs.writeFile('./API/reqRes.json', JSON.stringify(reqRes), (err) => {
+						if (err) throw err;
+						ws.send('reqRes added');
+					});
+				});
+			}
+
+			// delete reqRes
+			if (data.type === 'deleteReqRes') {
+				fs.readFile('./API/reqRes.json', 'utf8', (err, fileData) => {
+					if (err) throw err;
+					const reqRes = JSON.parse(fileData);
+					delete reqRes[data.key];
+					fs.writeFile('./API/reqRes.json', JSON.stringify(reqRes), (err) => {
+						if (err) throw err;
+						ws.send('reqRes deleted');
+					});
+				});
+			}
+		});
+
+		ws.on('close', () => {
+			console.log(`Client disconnected`);
+			wssSession = null;
+		});
+	});
+
+	return server;
+}
